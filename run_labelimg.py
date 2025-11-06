@@ -3,7 +3,7 @@ import subprocess
 
 def run_labelimg():
     # Set the paths for the image and annotation directories
-    image_dir = "output"
+    image_dir = "output_frames/images"
     annotation_classes = "classes.txt"
 
     # Run labelImg
