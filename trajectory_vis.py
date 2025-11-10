@@ -119,4 +119,4 @@ def main(txt_file):
 
 
 if __name__ == "__main__":
-    main("/home/satchel/basbetball-tracker/output_frames/labels/combined.txt")
+    main("output_frames/labels/combined.txt")
