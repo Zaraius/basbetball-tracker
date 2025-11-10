@@ -1,144 +1,122 @@
-import cv2
 import numpy as np
 from filterpy.kalman import KalmanFilter
-from yolox.tracker.byte_tracker import BYTETracker
+import matplotlib.pyplot as plt
 
 ##########################################
-# Kalman Filter (2D constant velocity)
+# Kalman Filter (2D constant acceleration)
 ##########################################
-def make_kf(dt=1/30):
-    kf = KalmanFilter(dim_x=4, dim_z=2)
+def make_kf(dt=1.0):
+    kf = KalmanFilter(dim_x=6, dim_z=2)
 
-    kf.F = np.array([[1, 0, dt, 0],
-                     [0, 1, 0, dt],
-                     [0, 0, 1,  0],
-                     [0, 0, 0,  1]])
+    kf.F = np.array([
+        [1,0,dt,0,0.5*dt*dt,0],
+        [0,1,0,dt,0,0.5*dt*dt],
+        [0,0,1,0,dt,0],
+        [0,0,0,1,0,dt],
+        [0,0,0,0,1,0],
+        [0,0,0,0,0,1]
+    ])
 
-    kf.H = np.array([[1, 0, 0, 0],
-                     [0, 1, 0, 0]])
+    kf.H = np.array([
+        [1,0,0,0,0,0],
+        [0,1,0,0,0,0]
+    ])
 
-    kf.P *= 1000.0          # initial uncertainty
-    kf.R = np.eye(2) * 10   # measurement noise
-    kf.Q = np.eye(4) * 0.05 # process noise
-
-    kf.x = np.zeros((4, 1)) # [x, y, vx, vy]
+    kf.P *= 1000.0
+    kf.R = np.eye(2) * 1.0
+    kf.Q = np.eye(6) * 0.01
+    kf.x = np.zeros((6,1))
     return kf
-
-##########################################
-# Predict n future steps (for trajectory)
-##########################################
-def predict_future(kf, steps=10, dt=1/30):
-    preds = []
-    x_backup = kf.x.copy()
-    P_backup = kf.P.copy()
-
-    for _ in range(steps):
-        kf.predict()
-        preds.append(kf.x[:2].flatten())
-
-    kf.x = x_backup
-    kf.P = P_backup
-    return preds
 
 ##########################################
 # Main
 ##########################################
-def main(detection_file, canvas_size=(720, 1280)):
-    # Tracker
-    tracker = BYTETracker(track_thresh=0.25,
-                          match_thresh=0.8,
-                          track_buffer=30,
-                          frame_rate=30)
+def main(txt_file):
+    data = np.loadtxt(txt_file)
 
-    kalman_filters = {}
+    print("=== DEBUG: Raw data shape ===")
+    print(data.shape)
 
-    # Read all detections
-    # Expected format per line: frame_id, x1, y1, x2, y2, score, class
-    detections = {}
-    with open(detection_file, 'r') as f:
-        for line in f:
-            parts = line.strip().split(',')
-            if len(parts) != 7:
-                continue
-            frame_id = int(parts[0])
-            x1, y1, x2, y2 = map(float, parts[1:5])
-            score = float(parts[5])
-            cls = int(parts[6])
-            if frame_id not in detections:
-                detections[frame_id] = []
-            detections[frame_id].append([x1, y1, x2, y2, score, cls])
+    print("=== DEBUG: First 5 rows ===")
+    print(data[:5])
 
-    max_frame = max(detections.keys())
-    H, W = canvas_size
+    if np.isnan(data).any():
+        print("WARNING: NaNs detected in input file.")
 
-    # Process each frame
-    for frame_id in range(1, max_frame + 1):
-        frame = np.zeros((H, W, 3), dtype=np.uint8)  # blank canvas
+    # Expect at least x, y in first two cols
+    if data.shape[1] < 2:
+        raise ValueError("Input does not have at least 2 columns for x,y")
 
-        dets = np.array(detections.get(frame_id, []))
-        if dets.size == 0:
-            dets = np.empty((0, 6))
+    # Use first two columns as (x,y)
+    positions = data[:, 1:3]
 
-        # ByteTrack wants: [x1, y1, x2, y2, score]
-        tracks = tracker.update(dets[:, :5], [H, W], [H, W])
+    x_positions = positions[:, 0]
+    y_positions = positions[:, 1]
 
-        for t in tracks:
-            track_id = int(t.track_id)
-            x1, y1, x2, y2 = t.tlbr
+    print("=== DEBUG: Position stats ===")
+    print("x min/max:", np.min(x_positions), np.max(x_positions))
+    print("y min/max:", np.min(y_positions), np.max(y_positions))
 
-            # Compute center point
-            cx = (x1 + x2) / 2
-            cy = (y1 + y2) / 2
-            meas = np.array([cx, cy])
+    kf = make_kf(dt=1.0)
 
-            # Create Kalman filter if needed
-            if track_id not in kalman_filters:
-                kf = make_kf()
-                kf.x[:2] = meas.reshape((2,1))
-                kalman_filters[track_id] = kf
+    trajectory = []
+    velocities = []
+    accelerations = []
 
-            kf = kalman_filters[track_id]
+    for frame_idx, pos in enumerate(positions):
+        meas = pos.reshape(2,1)
 
-            # Kalman prediction + update
-            kf.predict()
-            kf.update(meas)
-            x, y, vx, vy = kf.x.flatten()
+        if frame_idx == 0:
+            kf.x[:2] = meas  # set x,y
+            kf.x[2:6] = 0    # set v,a = 0
 
-            # Draw bounding box
-            cv2.rectangle(frame,
-                          (int(x1), int(y1)),
-                          (int(x2), int(y2)),
-                          (0, 255, 0), 2)
+        kf.predict()
+        kf.update(meas)
 
-            # Draw smoothed center
-            cv2.circle(frame, (int(x), int(y)), 5, (0, 0, 255), -1)
+        x, y, vx, vy, ax, ay = kf.x.flatten()
 
-            # Draw velocity vector
-            cv2.arrowedLine(frame,
-                            (int(x), int(y)),
-                            (int(x + vx * 5), int(y + vy * 5)),
-                            (255, 0, 0), 2)
+        trajectory.append([x, y])
+        velocities.append([vx, vy])
+        accelerations.append([ax, ay])
 
-            # Predict future trajectory
-            preds = predict_future(kf, steps=10)
-            for px, py in preds:
-                cv2.circle(frame, (int(px), int(py)), 3, (0, 255, 255), -1)
+        print(f"Frame {frame_idx}: x={x:.2f}, y={y:.2f}, vx={vx:.2f}, vy={vy:.2f}, ax={ax:.2f}, ay={ay:.2f}")
 
-            # Label
-            cv2.putText(frame, f"ID {track_id}",
-                        (int(x1), int(y1)-10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 255, 0), 2)
+    trajectory = np.array(trajectory)
+    velocities = np.array(velocities)
+    accelerations = np.array(accelerations)
 
-        # Display
-        cv2.imshow("Tracking from combined.txt", frame)
-        if cv2.waitKey(1) == 27:  # ESC to exit
-            break
+    print("=== DEBUG: Final check ===")
+    print("Frames:", len(trajectory))
+    print("Positions:", len(positions))
+    print("Velocities:", len(velocities))
+    print("Accelerations:", len(accelerations))
 
-    cv2.destroyAllWindows()
+    # Plot trajectory with velocity and acceleration vectors
+    plt.figure(figsize=(8,6))
+    plt.plot(trajectory[:,0], trajectory[:,1], 'k-o', label='Trajectory')
 
-##########################################
-# Run
-##########################################
+    # Velocity arrows
+    plt.quiver(
+        trajectory[:,0], trajectory[:,1],
+        velocities[:,0], velocities[:,1],
+        color='blue', scale_units='xy', angles='xy', scale=3
+    )
+
+    # Acceleration arrows
+    plt.quiver(
+        trajectory[:,0], trajectory[:,1],
+        accelerations[:,0], accelerations[:,1],
+        color='red', scale_units='xy', angles='xy', scale=20
+    )
+
+    plt.title("Trajectory with Velocity (blue) and Acceleration (red)")
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.grid(True)
+    plt.legend()
+    plt.axis('equal')
+    plt.show()
+
+
 if __name__ == "__main__":
-    main("combined.txt")  # ← path to your detection file
+    main("/home/satchel/basbetball-tracker/output_frames/labels/combined.txt")
